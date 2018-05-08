@@ -1,44 +1,44 @@
 glog
 ====
 
-Leveled execution logs for Go.
+在[golang/glog](https://github.com/golang/glog)的基础上做了一些修改。
 
-This is an efficient pure Go implementation of leveled logs in the
-manner of the open source C++ package
-	https://github.com/google/glog
+## 修改的地方:
+1. 增加每天切割日志文件的功能,并去除了复杂的文件命名,程序运行时指定 --dailyRolling=true	参数即可
+2. 将日志等级在原来的基础上增加 DEBUG 
+3. 去除高等级的日志内容会同时会被记录到低等级的日志文件中
+4. 将默认的刷新缓冲区时间由30s改为5s
 
-By binding methods to booleans it is possible to use the log package
-without paying the expense of evaluating the arguments to the log.
-Through the -vmodule flag, the package also provides fine-grained
-control over logging at the file level.
+##使用示例 
+```
+package main
 
-The comment from glog.go introduces the ideas:
+import (
+	"flag"
+	"./glog"
+)
 
-	Package glog implements logging analogous to the Google-internal
-	C++ INFO/ERROR/V setup.  It provides functions Info, Warning,
-	Error, Fatal, plus formatting variants such as Infof. It
-	also provides V-style logging controlled by the -v and
-	-vmodule=file=2 flags.
-	
-	Basic examples:
-	
-		glog.Info("Prepare to repel boarders")
-	
-		glog.Fatalf("Initialization failed: %s", err)
-	
-	See the documentation for the V function for an explanation
-	of these examples:
-	
-		if glog.V(2) {
-			glog.Info("Starting transaction...")
-		}
-	
-		glog.V(2).Infoln("Processed", nItems, "elements")
+func main() {
+	//初始化命令行参数
+	flag.Parse()
+	//退出时调用，确保日志写入文件中
+	defer glog.Flush()
+	glog.Infoln("hello-0, glog")
+	glog.Warningln("warning-0 glog") 
+	glog.Errorln("error-0 glog")
+	glog.Debugln("debug-0 glog")
 
+	glog.Info("hello, glog")
+	glog.Warning("warning glog")
+	glog.Error("error glog")
+	glog.Debug("debug glog")
 
-The repository contains an open source version of the log package
-used inside Google. The master copy of the source lives inside
-Google, not here. The code in this repo is for export only and is not itself
-under development. Feature requests will be ignored.
-
-Send bug reports to golang-nuts@googlegroups.com.
+	glog.Infof("info %d", 1)
+	glog.Warningf("warning %d", 2)
+	glog.Errorf("error %d", 3)
+	glog.Debugf("debug %d",4)
+}
+ 
+//假设编译后的可执行程序名为demo,运行时指定log_dir参数将日志文件保存到特定的目录
+// ./demo --log_dir=./log --dailyRolling=true 
+```
