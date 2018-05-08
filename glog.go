@@ -49,7 +49,9 @@
 //	-log_dir=""
 //		Log files will be written to this directory instead of the
 //		default temporary directory.
-//
+//  -dailyRolling=true
+//  	Split log by day
+//  	default false.
 //	Other flags provide aids to debugging.
 //
 //	-log_backtrace_at=""
@@ -102,16 +104,18 @@ const (
 	warningLog
 	errorLog
 	fatalLog
-	numSeverity = 4
+	debugLog
+	numSeverity = 5
 )
 
-const severityChar = "IWEF"
+const severityChar = "IWEFD"
 
 var severityName = []string{
 	infoLog:    "INFO",
 	warningLog: "WARNING",
 	errorLog:   "ERROR",
 	fatalLog:   "FATAL",
+	debugLog:   "DEBUG",
 }
 
 // get returns the value of the severity.
@@ -180,13 +184,14 @@ func (s *OutputStats) Bytes() int64 {
 // Stats tracks the number of lines of output and number of bytes
 // per severity level. Values must be read with atomic.LoadInt64.
 var Stats struct {
-	Info, Warning, Error OutputStats
+	Info, Warning, Error, Debug OutputStats
 }
 
 var severityStats = [numSeverity]*OutputStats{
 	infoLog:    &Stats.Info,
 	warningLog: &Stats.Warning,
 	errorLog:   &Stats.Error,
+	debugLog: &Stats.Debug,
 }
 
 // Level is exported because it appears in the arguments to V and is
@@ -397,6 +402,7 @@ type flushSyncWriter interface {
 
 func init() {
 	flag.BoolVar(&logging.toStderr, "logtostderr", false, "log to standard error instead of files")
+	flag.BoolVar(&logging.dailyRolling, "dailyRolling", false, " weather to handle log files daily")
 	flag.BoolVar(&logging.alsoToStderr, "alsologtostderr", false, "log to standard error as well as files")
 	flag.Var(&logging.verbosity, "v", "log level for V logs")
 	flag.Var(&logging.stderrThreshold, "stderrthreshold", "logs at or above this threshold go to stderr")
@@ -422,7 +428,7 @@ type loggingT struct {
 	// compatibility. TODO: does this matter enough to fix? Seems unlikely.
 	toStderr     bool // The -logtostderr flag.
 	alsoToStderr bool // The -alsologtostderr flag.
-
+	dailyRolling bool // The dailyRolling flag.
 	// Level flag. Handled atomically.
 	stderrThreshold severity // The -stderrthreshold flag.
 
@@ -559,24 +565,28 @@ func (l *loggingT) formatHeader(s severity, file string, line int) *buffer {
 
 	// Avoid Fprintf, for speed. The format is so simple that we can do it quickly by hand.
 	// It's worth about 3X. Fprintf is hard.
-	_, month, day := now.Date()
+	year, month, day := now.Date()
 	hour, minute, second := now.Clock()
-	// Lmmdd hh:mm:ss.uuuuuu threadid file:line]
-	buf.tmp[0] = severityChar[s]
-	buf.twoDigits(1, int(month))
-	buf.twoDigits(3, day)
-	buf.tmp[5] = ' '
-	buf.twoDigits(6, hour)
-	buf.tmp[8] = ':'
-	buf.twoDigits(9, minute)
-	buf.tmp[11] = ':'
-	buf.twoDigits(12, second)
-	buf.tmp[14] = '.'
-	buf.nDigits(6, 15, now.Nanosecond()/1000, '0')
-	buf.tmp[21] = ' '
-	buf.nDigits(7, 22, pid, ' ') // TODO: should be TID
-	buf.tmp[29] = ' '
-	buf.Write(buf.tmp[:30])
+	// [Lyymmddmmdd hh:mm:ss.uuuuuu threadid file:line]
+	buf.tmp[0] = '['
+	buf.tmp[1] = severityChar[s]
+	//buf.nDigits(4, 1, int(year) ,' ')
+	buf.someDigits(2,  int(year))
+	buf.twoDigits(6, int(month))
+	buf.twoDigits(8, day)
+	buf.tmp[10] = ' '
+	buf.twoDigits(11, hour)
+	buf.tmp[13] = ':'
+	buf.twoDigits(14, minute)
+	buf.tmp[16] = ':'
+	buf.twoDigits(17, second)
+	buf.tmp[19] = '.'
+	buf.nDigits(6, 20, now.Nanosecond()/1000, '0')
+	buf.tmp[26] = ' '
+	//buf.nDigits(7, 26, pid, ' ') // TODO: should be TID
+	buf.someDigits(27, pid) // TODO: should be TID
+	buf.tmp[34] = ' '
+	buf.Write(buf.tmp[:35])
 	buf.WriteString(file)
 	buf.tmp[0] = ':'
 	n := buf.someDigits(1, line)
@@ -592,6 +602,7 @@ const digits = "0123456789"
 
 // twoDigits formats a zero-prefixed two-digit integer at buf.tmp[i].
 func (buf *buffer) twoDigits(i, d int) {
+	
 	buf.tmp[i+1] = digits[d%10]
 	d /= 10
 	buf.tmp[i] = digits[d%10]
@@ -692,15 +703,17 @@ func (l *loggingT) output(s severity, buf *buffer, file string, line int, alsoTo
 			}
 		}
 		switch s {
+		case debugLog:
+			l.file[debugLog].Write(data)
 		case fatalLog:
 			l.file[fatalLog].Write(data)
-			fallthrough
+			//fallthrough
 		case errorLog:
 			l.file[errorLog].Write(data)
-			fallthrough
+			//fallthrough
 		case warningLog:
 			l.file[warningLog].Write(data)
-			fallthrough
+			//fallthrough
 		case infoLog:
 			l.file[infoLog].Write(data)
 		}
@@ -805,6 +818,7 @@ type syncBuffer struct {
 	file   *os.File
 	sev    severity
 	nbytes uint64 // The number of bytes written to this file
+	createdDate string // The Date string
 }
 
 func (sb *syncBuffer) Sync() error {
@@ -812,6 +826,13 @@ func (sb *syncBuffer) Sync() error {
 }
 
 func (sb *syncBuffer) Write(p []byte) (n int, err error) {
+	if logging.dailyRolling {
+		if sb.createdDate != string(p[2:10]) {
+			if err := sb.rotateFile(time.Now()); err != nil {
+				sb.logger.exit(err)
+			}
+		}
+	}
 	if sb.nbytes+uint64(len(p)) >= MaxSize {
 		if err := sb.rotateFile(time.Now()); err != nil {
 			sb.logger.exit(err)
@@ -839,13 +860,15 @@ func (sb *syncBuffer) rotateFile(now time.Time) error {
 	}
 
 	sb.Writer = bufio.NewWriterSize(sb.file, bufferSize)
+	year, month, day := now.Date()
+	sb.createdDate = fmt.Sprintf("%d%02d%02d", year, month, day)
 
 	// Write header.
 	var buf bytes.Buffer
 	fmt.Fprintf(&buf, "Log file created at: %s\n", now.Format("2006/01/02 15:04:05"))
 	fmt.Fprintf(&buf, "Running on machine: %s\n", host)
 	fmt.Fprintf(&buf, "Binary: Built with %s %s for %s/%s\n", runtime.Compiler, runtime.Version(), runtime.GOOS, runtime.GOARCH)
-	fmt.Fprintf(&buf, "Log line format: [IWEF]mmdd hh:mm:ss.uuuuuu threadid file:line] msg\n")
+	fmt.Fprintf(&buf, "Log line format: [[IWEFD]yymmdd hh:mm:ss.uuuuuu threadid file:line] msg\n")
 	n, err := sb.file.Write(buf.Bytes())
 	sb.nbytes += uint64(n)
 	return err
@@ -875,7 +898,7 @@ func (l *loggingT) createFiles(sev severity) error {
 	return nil
 }
 
-const flushInterval = 30 * time.Second
+const flushInterval = 5 * time.Second
 
 // flushDaemon periodically flushes the log file buffers.
 func (l *loggingT) flushDaemon() {
@@ -895,7 +918,7 @@ func (l *loggingT) lockAndFlushAll() {
 // l.mu is held.
 func (l *loggingT) flushAll() {
 	// Flush from fatal down, in case there's trouble flushing.
-	for s := fatalLog; s >= infoLog; s-- {
+	for s := debugLog; s >= infoLog; s-- {
 		file := l.file[s]
 		if file != nil {
 			file.Flush() // ignore error
@@ -1146,6 +1169,22 @@ func Fatalln(args ...interface{}) {
 // Arguments are handled in the manner of fmt.Printf; a newline is appended if missing.
 func Fatalf(format string, args ...interface{}) {
 	logging.printf(fatalLog, format, args...)
+}
+
+func Debug(args ...interface{}) {
+	logging.print(debugLog, args...)
+}
+
+func DebugDepth(depth int, args ...interface{}) {
+	logging.printDepth(debugLog, depth, args...)
+}
+
+func Debugln(args ...interface{}) {
+	logging.println(debugLog, args...)
+}
+
+func Debugf(format string, args ...interface{}) {
+	logging.printf(debugLog, format, args...)
 }
 
 // fatalNoStacks is non-zero if we are to exit without dumping goroutine stacks.
